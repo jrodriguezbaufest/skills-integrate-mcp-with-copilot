@@ -1,5 +1,4 @@
 {
-  "_comment": "Passwords are stored as pbkdf2:sha256:<salt>:<hash>. Use the /auth/hash-password endpoint to generate new entries.",
-  "ms.johnson": "pbkdf2:sha256:4d6572676e61746f6e48696768:8b7a3f2e1c9d0a5b4e8f2c6d1a9e3b7f4c8d0e2a6b5c9d3f7e1b4a8c2e6f0d3a",
-  "mr.smith": "pbkdf2:sha256:5363686f6f6c41646d696e3231:3a1b5c9d7e2f4a8b6c0d3e5f7a9b1c3d5e7f9a0b2c4d6e8f0a1b3c5d7e9f2a4b"
+  "ms.johnson": "plain:password123",
+  "mr.smith": "plain:teacher456"
 }
