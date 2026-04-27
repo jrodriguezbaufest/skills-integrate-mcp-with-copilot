@@ -5,10 +5,14 @@ A super simple FastAPI application that allows students to view and sign up
 for extracurricular activities at Mergington High School.
 """
 
-from fastapi import FastAPI, HTTPException
+from fastapi import FastAPI, HTTPException, Depends
 from fastapi.staticfiles import StaticFiles
 from fastapi.responses import RedirectResponse
+from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials
 import os
+import json
+import hashlib
+import secrets
 from pathlib import Path
 
 app = FastAPI(title="Mergington High School API",
@@ -77,6 +81,49 @@ activities = {
     }
 }
 
+# In-memory session store: token -> username
+active_sessions: dict[str, str] = {}
+
+TEACHERS_FILE = current_dir / "teachers.json"
+security = HTTPBearer(auto_error=False)
+
+
+def _load_teachers() -> dict:
+    if not TEACHERS_FILE.exists():
+        return {}
+    with open(TEACHERS_FILE, "r") as f:
+        return json.load(f)
+
+
+def _save_teachers(teachers: dict) -> None:
+    with open(TEACHERS_FILE, "w") as f:
+        json.dump(teachers, f, indent=2)
+
+
+def _hash_password(password: str) -> str:
+    """Hash a password with a random salt using PBKDF2-HMAC-SHA256."""
+    salt = secrets.token_hex(16)
+    hashed = hashlib.pbkdf2_hmac("sha256", password.encode(), salt.encode(), 100000).hex()
+    return f"pbkdf2:{salt}:{hashed}"
+
+
+def _verify_password(password: str, stored: str) -> bool:
+    """Verify a password against a stored hash (or plain: prefix for initial setup)."""
+    if stored.startswith("plain:"):
+        return password == stored[len("plain:"):]
+    if stored.startswith("pbkdf2:"):
+        _, salt, hashed = stored.split(":", 2)
+        check = hashlib.pbkdf2_hmac("sha256", password.encode(), salt.encode(), 100000).hex()
+        return secrets.compare_digest(check, hashed)
+    return False
+
+
+def get_current_teacher(credentials: HTTPAuthorizationCredentials = Depends(security)) -> str:
+    """Validate bearer token and return the teacher's username."""
+    if credentials is None or credentials.credentials not in active_sessions:
+        raise HTTPException(status_code=401, detail="Not authenticated as a teacher")
+    return active_sessions[credentials.credentials]
+
 
 @app.get("/")
 def root():
@@ -88,9 +135,36 @@ def get_activities():
     return activities
 
 
+@app.post("/auth/login")
+def login(username: str, password: str):
+    """Authenticate a teacher and return a session token."""
+    teachers = _load_teachers()
+    stored = teachers.get(username)
+    if stored is None or not _verify_password(password, stored):
+        raise HTTPException(status_code=401, detail="Invalid username or password")
+
+    # Upgrade plain-text password to hashed on first successful login
+    if stored.startswith("plain:"):
+        teachers[username] = _hash_password(password)
+        _save_teachers(teachers)
+
+    token = secrets.token_hex(32)
+    active_sessions[token] = username
+    return {"token": token, "username": username}
+
+
+@app.post("/auth/logout")
+def logout(teacher: str = Depends(get_current_teacher),
+           credentials: HTTPAuthorizationCredentials = Depends(security)):
+    """Invalidate the current session token."""
+    active_sessions.pop(credentials.credentials, None)
+    return {"message": "Logged out successfully"}
+
+
 @app.post("/activities/{activity_name}/signup")
-def signup_for_activity(activity_name: str, email: str):
-    """Sign up a student for an activity"""
+def signup_for_activity(activity_name: str, email: str,
+                        teacher: str = Depends(get_current_teacher)):
+    """Sign up a student for an activity (teachers only)."""
     # Validate activity exists
     if activity_name not in activities:
         raise HTTPException(status_code=404, detail="Activity not found")
@@ -105,14 +179,22 @@ def signup_for_activity(activity_name: str, email: str):
             detail="Student is already signed up"
         )
 
+    # Validate max participants not exceeded
+    if len(activity["participants"]) >= activity["max_participants"]:
+        raise HTTPException(
+            status_code=400,
+            detail="Activity is full"
+        )
+
     # Add student
     activity["participants"].append(email)
     return {"message": f"Signed up {email} for {activity_name}"}
 
 
 @app.delete("/activities/{activity_name}/unregister")
-def unregister_from_activity(activity_name: str, email: str):
-    """Unregister a student from an activity"""
+def unregister_from_activity(activity_name: str, email: str,
+                              teacher: str = Depends(get_current_teacher)):
+    """Unregister a student from an activity (teachers only)."""
     # Validate activity exists
     if activity_name not in activities:
         raise HTTPException(status_code=404, detail="Activity not found")
